@@ -1,0 +1,97 @@
+service: aws-api-gateway-mtls-example
+frameworkVersion: '3'
+variablesResolutionMode: 20210326
+
+provider:
+  name: aws
+  runtime: nodejs14.x
+  lambdaHashingVersion: 20201221
+  logRetentionInDays: 14 
+  region: eu-central-1
+  deploymentBucket:
+    blockPublicAccess: true
+    
+resources:
+  Resources:
+    AccessLogsLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/apigateway/${self:service}-AccessLogs
+        RetentionInDays: 14
+    AwsExampleApiGateway:
+      Type: AWS::ApiGatewayV2::Api
+      Properties:
+        Name: "Aws API Gateway with mTLS Example"
+        ProtocolType: HTTP
+        DisableExecuteApiEndpoint: true
+    AwsExampleApiGatewayStage:
+      Type: 'AWS::ApiGatewayV2::Stage'
+      Properties:
+        ApiId: !Ref AwsExampleApiGateway
+        StageName: $default
+        AutoDeploy: true
+        AccessLogSettings:
+          DestinationArn: "arn:aws:logs:${aws:region}:${aws:accountId}:log-group:/aws/apigateway/${self:service}-AccessLogs"
+          Format: '{ "requestId":"$context.requestId", "ip": "$context.identity.sourceIp", "requestTime":"$context.requestTime", "httpMethod":"$context.httpMethod","routeKey":"$context.routeKey", "status":"$context.status","protocol":"$context.protocol", "responseLength":"$context.responseLength" }'
+    EchoLambdaIntegration:
+      Type: AWS::ApiGatewayV2::Integration
+      Properties:
+        ApiId: !Ref AwsExampleApiGateway
+        IntegrationType: AWS_PROXY
+        IntegrationMethod: ANY
+        IntegrationUri: arn:aws:lambda:${aws:region}:${aws:accountId}:function:${self:service}-echo
+        PayloadFormatVersion: "1.0"
+        RequestParameters:
+          "append:header.x-subject": "$context.authorizer.subject"
+    EchoLambdaIntegrationPermission:
+      Type: AWS::Lambda::Permission
+      Properties:
+        FunctionName: !Ref EchoLambdaFunction
+        Action: lambda:InvokeFunction
+        Principal: apigateway.amazonaws.com
+        SourceArn: 
+          Fn::Sub: arn:aws:execute-api:${aws:region}:${aws:accountId}:${AwsExampleApiGateway}/*/*/*
+    AwsExampleApiGatewayAuthorizer:
+      Type: 'AWS::ApiGatewayV2::Authorizer'
+      Properties:
+        Name: ${self:service}-authorizer
+        ApiId: !Ref AwsExampleApiGateway
+        AuthorizerType: REQUEST
+        AuthorizerUri: "arn:aws:apigateway:${aws:region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${aws:region}:${aws:accountId}:function:${self:service}-authorizer/invocations"
+        AuthorizerPayloadFormatVersion: '2.0'
+        EnableSimpleResponses: true
+        AuthorizerResultTtlInSeconds: 0
+    AwsExampleApiGatewayAuthorizerPermission:
+      Type: AWS::Lambda::Permission
+      Properties:
+        FunctionName: !Ref AuthorizeLambdaFunction
+        Action: lambda:InvokeFunction
+        Principal: apigateway.amazonaws.com
+        SourceArn: 
+          Fn::Sub: arn:aws:execute-api:${aws:region}:${aws:accountId}:${AwsExampleApiGateway}/authorizers/${AwsExampleApiGatewayAuthorizer}   
+    AwsExampleApiGatewayTestGetRoute:
+      Type: 'AWS::ApiGatewayV2::Route'
+      DependsOn: EchoLambdaIntegration
+      Properties:
+        ApiId: !Ref AwsExampleApiGateway
+        RouteKey: "ANY /"
+        AuthorizationType: CUSTOM
+        AuthorizerId: !Ref AwsExampleApiGatewayAuthorizer
+        Target: !Join
+          - /
+          - - integrations
+            - !Ref EchoLambdaIntegration
+
+functions:
+  authorize:
+    handler: src/authorizer.authorize
+    name: ${self:service}-authorizer
+    description: authenticates all requests and adds the subject of the client certificate to the context
+    memorySize: 512
+    timeout: 30
+  echo:
+    handler: src/echo.echo
+    name: ${self:service}-echo
+    description: lambda to just return the clients certificate subject of the calling client
+    memorySize: 512
+    timeout: 30
